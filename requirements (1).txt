@@ -4,4 +4,5 @@ numpy
 openpyxl
 sentence-transformers
 torch
-
+fuzzywuzzy
+python-Levenshtein
