@@ -5,6 +5,8 @@ from fuzzywuzzy import fuzz, process
 import io
 import re
 from collections import Counter
+from sentence_transformers import SentenceTransformer, util
+
 
 def main():
     st.title("JobStreet & LinkedIn Company Data Matcher")
@@ -213,63 +215,60 @@ def extract_linkedin_companies(df):
     
     return company_counts
 
-def match_companies_enhanced(jobstreet_companies, linkedin_companies, threshold=75):
-    """Enhanced company matching using fuzzy matching with name normalization"""
+# Cache the model to avoid re-loading it every time the app re-runs
+@st.cache_resource
+def get_sentence_transformer():
+    """Load and cache the Sentence-Transformer model."""
+    return SentenceTransformer('all-MiniLM-L6-v2')
+
+def match_companies_semantic(jobstreet_companies, linkedin_companies, threshold_score=0.75):
+    """
+    Matches companies using semantic similarity based on sentence embeddings.
+    
+    Args:
+        jobstreet_companies (dict): A dictionary of company names from JobStreet.
+        linkedin_companies (dict): A dictionary of company names from LinkedIn.
+        threshold_score (float): The minimum semantic similarity score (0-1) to consider a match.
+        
+    Returns:
+        dict: A dictionary mapping JobStreet company names to a tuple of 
+              (LinkedIn company name, score).
+    """
+    model = get_sentence_transformer()
+    
+    # Get unique company names and ensure they are not empty
+    js_names = [name for name in jobstreet_companies.keys() if name and isinstance(name, str)]
+    li_names = [name for name in linkedin_companies.keys() if name and isinstance(name, str)]
+    
+    if not js_names or not li_names:
+        return {}
+
+    # Generate embeddings for all company names
+    js_embeddings = model.encode(js_names, convert_to_tensor=True)
+    li_embeddings = model.encode(li_names, convert_to_tensor=True)
+    
     matches = {}
     
-    # Create normalized mapping for LinkedIn companies
-    linkedin_normalized = {}
-    for li_company in linkedin_companies.keys():
-        normalized = normalize_company_name(li_company)
-        if normalized:
-            linkedin_normalized[li_company] = normalized
+    # Compute cosine similarity between all pairs
+    cosine_scores = util.cos_sim(js_embeddings, li_embeddings)
     
-    for js_company in jobstreet_companies.keys():
-        js_normalized = normalize_company_name(js_company)
-        if not js_normalized:
-            continue
-            
-        best_match = None
-        best_score = 0
+    # Find the best match for each JobStreet company
+    for i, js_name in enumerate(js_names):
+        best_match_score = -1
+        best_match_index = -1
         
-        # Try exact normalized match first
-        for li_company, li_normalized in linkedin_normalized.items():
-            if js_normalized.lower() == li_normalized.lower():
-                matches[js_company] = (li_company, 100)
-                best_match = li_company
-                break
+        # Iterate through LinkedIn companies to find the best match
+        for j, li_name in enumerate(li_names):
+            score = cosine_scores[i][j].item()
+            if score > best_match_score:
+                best_match_score = score
+                best_match_index = j
         
-        # If no exact match, use fuzzy matching on both original and normalized names
-        if not best_match:
-            # Test against original company names
-            match_result = process.extractOne(
-                js_company, 
-                linkedin_companies.keys(),
-                scorer=fuzz.ratio
-            )
+        # If the best match exceeds the threshold, record it
+        if best_match_score >= threshold_score:
+            matched_li_name = li_names[best_match_index]
+            matches[js_name] = (matched_li_name, round(best_match_score * 100)) # Convert to percentage
             
-            if match_result and match_result[1] >= threshold:
-                best_match = match_result[0]
-                best_score = match_result[1]
-            
-            # Also test against normalized names
-            normalized_match = process.extractOne(
-                js_normalized,
-                list(linkedin_normalized.values()),
-                scorer=fuzz.ratio
-            )
-            
-            if normalized_match and normalized_match[1] > best_score and normalized_match[1] >= threshold:
-                # Find the original company name for this normalized match
-                for li_company, li_normalized in linkedin_normalized.items():
-                    if li_normalized == normalized_match[0]:
-                        best_match = li_company
-                        best_score = normalized_match[1]
-                        break
-            
-            if best_match:
-                matches[js_company] = (best_match, best_score)
-    
     return matches
 
 def get_linkedin_employees_for_company(linkedin_df, company_name):
